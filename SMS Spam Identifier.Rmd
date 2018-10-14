@@ -1,0 +1,404 @@
+---
+title: "SMS Spam Identifier"
+author: "Achmad Gunar Saadi"
+date: "September 25, 2018"
+output:
+  html_document:
+    toc: TRUE
+    toc_depth: 3
+    toc_float:
+      collapsed: FALSE
+    highlight:  pygments
+    theme: spacelab
+    number_sections: TRUE
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Intro of Capstone Project: "SMS Spam Identifier"
+
+In this project, we are going to build a classification model to create a spam classifier.The dataset is a real SMS dataset with spam/ ham label for each message. <br />
+Making a report of the approach you use in building the model classifier. The report should have a clear explanation of:<br />
+- *Data Preprocess* <br />
+Show how you feature engineered the attributes you are going to use in your model.<br />
+- *Model Selection* <br />
+In building the model, we should consider multiple parameters in coming up with the best model.<br />
+- *Predicting Spam SMS* <br />
+Based on the best model picked in previous step, use the model to predict SMS messages stored in `data/submissionSMS.csv`.<br />
+
+*Rubric*:<br />
+Achieve at least 90% of precision on unseen data <br />
+Achieve at least 80% of accuracy on unseen data <br />
+Achieve at least 80% of recall on unseen data <br />
+Achieve at least 85% of specificity on unseen data <br />
+
+# Data Preprocess
+
+```{r}
+library(lubridate)
+msg <- read.csv("./sms.csv")
+head(msg$DATE)
+dim(msg)
+names(msg)
+str(msg)
+summary(msg)
+head(msg$CONTAIN)
+tail(msg$CONTAIN)
+```
+
+The dataset contains 1805 observations and 3 columns (DATE,CONTAIN,STATUS). The `DATE` attribute contain timestamp (date and time) SMS received information in __YMD-HMS__ format. The `CONTAIN` attribute store the texts of SMS received. While the label whether spam (unwanted SMS) or ham stored in `STATUS` attribute. All the attributes are in Factor class. `STATUS` has 2 levels, while `CONTAIN` and `DATE` have 1530 and 1532 levels respectively. The dataset range from 15th February 2017 to 28th February 2018.<br />
+
+
+```{r}
+dt<-parse_date_time(msg$DATE, orders = "ymd HMS")
+dt.d<-as.Date(dt)
+dt.h<-hour(dt)
+dt.m<-minute(dt)
+range(dt.d)
+```
+
+Here, the dataset is redefined into new dataframe structure and stored in `msg`. The new dataframe contains `Date`,`Hour`,`Minute`,`Contain`,and `Status` attributes.
+
+```{r}
+# redefine the data frame
+msg<-data.frame("Date"=dt.d,"Hour"=dt.h, "Minute"=dt.m,"Contain"=msg$CONTAIN,"Status"=msg$STATUS)
+head(msg)
+```
+
+## Text Mining
+
+Creating the corpus using VCorpus function. Then, create a customized function, `transformer`, that commbine the application of content_transformer and gsub functions which is convert some pattern into white space (" "). <br /> 
+
+```{r}
+library(tm)
+#Create corpus object
+msg.corpus <- VCorpus(VectorSource(msg$Contain))
+msg.corpus[[1]]$content
+# Create a custom transformer to substitute punctuations with a space (" ")
+transformer <- content_transformer(function(x, pattern) {
+    gsub(pattern, " ", x)
+})
+# Create a function to substitute URL with a space (" ")
+removeURL<-function(x){
+  gsub("http[^[[:space:]]*"," ",x)
+}
+```
+
+### Data Cleansing
+
+To make the data text more uniform in format and structure, conducted means as below:
+- Convert all text into lowercase <br />
+- Remove number
+- Substitute the newline punctuation (__"\\n"__) with white space using transformer function
+- Remove stopwords (the list of words are in file `stopwords-id.txt`) <br />
+- Substitute common punctuations such as: __".", "/", "@", and "-"__ with a white space using transformer function <br />
+- Remove other common punctuations using built-in function in R <br />
+- Separate words by a white space using `stemDocument` and `stripWhitespace` <br />
+
+```{r}
+# data cleansing
+# convert all text to lowercase
+msg.corpus <- tm_map(msg.corpus, content_transformer(tolower)) 
+# Remove numbers and punctuations
+msg.corpus <- tm_map(msg.corpus, removeNumbers)
+msg.corpus <- tm_map(msg.corpus, transformer, "\\n")
+# Remove stopwords
+stopwords <- readLines("./stopwords-id.txt")
+msg.corpus <- tm_map(msg.corpus, removeWords, stopwords)
+
+# Substitute ".", "/", "@", common punctuations, and URL with a white space (" ")
+msg.corpus<- tm_map(msg.corpus, transformer, "/")
+msg.corpus <- tm_map(msg.corpus, transformer, "@")
+msg.corpus <- tm_map(msg.corpus, transformer, "-")
+msg.corpus <- tm_map(msg.corpus, transformer, "\\.")
+msg.corpus <- tm_map(msg.corpus,content_transformer(removeURL) )
+# For all other punctuations, simply strip them using the built-in function
+msg.corpus.new <- tm_map(msg.corpus, removePunctuation)
+
+#Separate words by one whitespace
+msg.corpus.new <- tm_map(msg.corpus.new, stemDocument)
+msg.corpus.new <- tm_map(msg.corpus.new, stripWhitespace)
+```
+
+### Stemming (Lemmatization) and Tokenization
+
+The stemming process using function in katadasaR library, which can be accessed by clicking [this link](https://github.com/nurandi/katadasaR) <br />
+After that, the tokenization is conducted for splitting each corpus element into individual phrases by using DocumentTermMatrix function that resulting in Document Term Matrix (DTM).<br />
+As for the next preprocessing, by using findFreqTerms function, the possible noise can be reduce through filtering that words processed are words that  appeared in at least 30 messages.<br />
+
+```{r}
+#stemming
+library(katadasaR)
+
+stem_bahasa<-content_transformer(function(x){
+  paste(sapply(words(x), katadasar),collapse = " ")
+})
+msg.stem<-tm_map(msg.corpus.new,stem_bahasa)
+
+# Tokenization
+msg.dtm <- DocumentTermMatrix(msg.stem)
+x<-inspect(msg.dtm)
+msg_freq<-findFreqTerms(msg.dtm,30)
+```
+```{r}
+mm <- as.matrix(msg.dtm)
+vv <- sort(rowSums(mm),decreasing=TRUE)
+dd <- data.frame(word = names(vv),freq=vv)
+```
+
+## Splitting into Training and Test Set
+
+The dataset is splitted into training and test set with proportion 80% and 20% respectively after being random sampling. In other words the training set contains observations , while  the test set observations.<br />
+The training and test label are defined from the 5th column in the `msg` variable.<br />
+
+```{r}
+set.seed(10)
+ind_split <- sample(nrow(msg.dtm), nrow(msg.dtm)*0.80)
+msg_train <- msg.dtm[ind_split, ]
+msg_test <- msg.dtm[-ind_split, ]
+dim(msg_train)
+dim(msg_test)
+train_label <- msg[ind_split, 5]
+test_label <- msg[-ind_split,5]
+
+table(train_label)
+prop.table(table(train_label))
+```
+
+We'll then subset our training and test set to get all the rows (corresponding to documents) but only include columns (terms) where they have appeared in at least 30 messages.<br />
+
+```{r}
+msg_train <- msg_train[,msg_freq]
+msg_test <- msg_test[,msg_freq]
+```
+
+Creating an own-designed function named bernoulli_conv that converts every word that at least has value of 1 or more into 1 (one). Otherwise, the value is 0 (zero). So, the function produces a binomial vector.<br />
+
+```{r}
+bernoulli_conv <- function(x){
+  x <- ifelse(x>=1,1,0)
+}
+train_bn <- apply(msg_train, 2, bernoulli_conv)
+test_bn <- apply(msg_test, 2, bernoulli_conv)
+```
+
+# Model Selection
+
+## Naive Bayes Algorithm
+
+Check whether in training and test set there are some words that have 0 (zero) value. Because based on Naive Bayes algorithm, even just one event with zero-probability (zero appearance) in DTM can leads to zero value for the final result. Thus, zero-probability must be avoided. One of the solutions is by using laplace smoothing later in our model construction. <br />
+
+```{r}
+num_train <- colSums(apply(train_bn, 2, as.numeric))
+num_test <- colSums(apply(test_bn, 2, as.numeric))
+```
+
+Aftter omitting the uunnecessary words, from the word cloud of training set and test set, the most frequently appeared is the words `info` and `kuota`. It is reasonable result because basically training and test set are from the same dataset.<br /> 
+
+```{r}
+library("wordcloud")
+library("RColorBrewer")
+# Drop unnecessary words in training set
+drops<-c("aja","bls","dgn","dpt","ire","lho","maaf","mai","pai","skrg","tdk","utk")
+ntrain<-num_train[!(names(num_train) %in% drops)]
+# Creating Word Cloud in training set
+wordcloud(words = names(ntrain), freq = ntrain, min.freq = 1,
+          max.words=100, random.order=F, rot.per=0.45, 
+          colors=brewer.pal(5, "Dark2"))
+```
+
+```{r}
+# Drop unnecessary words in test set
+drops<-c("aja","dgn","dpt","ire","lho","mai","pai","skrg","tdk","utk")
+ntest<-num_train[!(names(num_train) %in% drops)]
+# Creating Word Cloud in test set
+wordcloud(words = names(ntest), freq = ntest, min.freq = 1,
+          max.words=100, random.order=F, rot.per=0.45, 
+          colors=brewer.pal(5, "Dark2"))
+```
+
+In the checking process, we found that there is no zero-probability in both training and test set. But even so, we still will run the laplace smooting to anticipate the zero-probability in the `submissionSMS.csv` file. <br />
+
+```{r}
+num_train[num_train < 1]
+num_test[num_test < 1]
+```
+
+Execute the naiveBayes function to obtain the model through Naive Bayes algorithm. <br />
+
+```{r}
+library(e1071)
+spam_model <- naiveBayes(train_bn, train_label, laplace = 1)
+# Predict
+spam_prediction <- predict(spam_model, test_bn)
+```
+
+Model performance Evaluation through confusion matrix and ROC.<br />
+
+```{r}
+table(prediction = spam_prediction, actual=test_label)
+```
+
+```{r}
+TN<-sum(spam_prediction == 'ham'&test_label=='ham')
+FN<-sum(spam_prediction == 'ham'&test_label=='spam')
+TP<-sum(spam_prediction == 'spam'&test_label=='spam')
+FP<-sum(spam_prediction == 'spam'&test_label=='ham')
+```
+
+```{r}
+#precision
+TP/(TP+FP)*100
+#accuracy
+(TN+TP)/length(test_label)*100
+#recall/ sensitivity
+TP/(TP+FN)*100
+#Specificity
+TN/(TN+FP)*100
+```
+```{r}
+library(caret)
+confusionMatrix(as.factor(spam_prediction),as.factor(test_label))
+```
+
+```{r}
+spam_prediction_raw <- predict(spam_model, test_bn, type = "raw")
+head(spam_prediction_raw)
+```
+
+```{r}
+# Plot ROC Curve
+spam_df <- data.frame("prediction"=spam_prediction_raw[,2], "trueclass"=as.numeric(test_label=="spam"))
+head(spam_df)
+
+library(ROCR)
+spam_roc <- ROCR::prediction(spam_df$prediction, spam_df$trueclass)  
+plot(performance(spam_roc, "tpr", "fpr"))
+```
+
+# Prediction Spam
+
+Based on the best model picked in previous step (Naive Bayes Algorithm), use the model to predict SMS messages stored in  `./submissionSMS.csv`. The prediction should contain 2 classes: *spam* or *ham*. The forecasted prediction should be filled in under `STATUS` column in the same file. <br />
+
+The dataset contains 323 observations and 3 columns (DATE,CONTAIN,STATUS). The `DATE` attribute contain timestamp (date and time) SMS received information in __YMD-HMS__ format. The `CONTAIN` attribute store the texts of SMS received. While the `STATUS` attribute still empty and need to fill by the prediction final result. The dataset range from 28th February 2018 to 25th April 2018. That means the `submissionSMS.csv` dataset cover the data from the end of the date of `sms.csv` to two months ahead. <br />
+
+```{r}
+library(lubridate)
+sms.s <- read.csv("./submissionSMS.csv")
+head(sms.s)
+dim(sms.s)
+str(sms.s)
+summary(sms.s)
+
+dt<-parse_date_time(sms.s$DATE, orders = "ymd HMS")
+dt.d<-as.Date(dt)
+dt.h<-hour(dt)
+dt.m<-minute(dt)
+range(dt.d)
+```
+
+Here, the dataset is redefined into new dataframe structure and stored in `msgg`. The new dataframe contains `Date`,`Hour`,`Minute`,`Contain`,and `Status` attributes.
+
+```{r}
+# redefine the data frame
+msgg<-data.frame("Date"=dt.d,"Hour"=dt.h, "Minute"=dt.m,"Contain"=sms.s$CONTAIN,"Status"=sms.s$STATUS)
+head(msgg)
+```
+
+## Text Mining
+
+Overall, the steps in text mining same as in previous dataset.<br />
+That covers creating corpus, transformer function, and data cleansing. <br />
+
+```{r}
+library(tm)
+
+#Create corpus object
+msgg.corpus <- VCorpus(VectorSource(msgg$Contain))
+msgg.corpus[[1]]$content
+```
+
+```{r}
+# data cleansing
+# convert all text to lowercase
+msgg.corpus <- tm_map(msgg.corpus, content_transformer(tolower)) 
+# Remove numbers and punctuations
+msgg.corpus <- tm_map(msgg.corpus, removeNumbers)
+msgg.corpus <- tm_map(msgg.corpus, transformer, "\\n")
+# Remove stopwords
+stopwords <- readLines("./stopwords-id.txt")
+msgg.corpus <- tm_map(msgg.corpus, removeWords, stopwords)
+
+# Substitute ".", "/", "@" and common punctuations with a white space (" ")
+msgg.corpus<- tm_map(msgg.corpus, transformer, "/")
+msgg.corpus <- tm_map(msgg.corpus, transformer, "@")
+msgg.corpus <- tm_map(msgg.corpus, transformer, "-")
+msgg.corpus <- tm_map(msgg.corpus, transformer, "\\.")
+# For all other punctuations, simply strip them using the built-in function
+msgg.corpus.new <- tm_map(msgg.corpus, removePunctuation)
+
+#Separate words by one whitespace
+msgg.corpus.new <- tm_map(msgg.corpus.new, stemDocument)
+msgg.corpus.new <- tm_map(msgg.corpus.new, stripWhitespace)
+msgg.corpus.new[[1]]$content
+```
+
+The stemming process still the same, using function in katadasaR library. <br />
+As for the tokenization, we'd use dictionary list extracted from train data in creating DTM to make sure token attributes used in both train and test are the same. <br />
+By using findFreqTerms function, the possible noise can be reduce through filtering that words processed are words that  appeared in at least 30 messages. <br />
+
+```{r}
+#stemming
+library(katadasaR)
+
+stem_bahasa<-content_transformer(function(x){
+  paste(sapply(words(x), katadasar),collapse = " ")
+})
+msgg.stem<-tm_map(msgg.corpus.new,stem_bahasa)
+
+# Tokenization
+dtm <- DocumentTermMatrix(msg.stem)
+freqTerms<-findFreqTerms(dtm,30)
+reduced_dtm<-DocumentTermMatrix(msgg.stem, list(dictionary=freqTerms))
+```
+
+```{r}
+bernoulli_conv <- function(x){
+  x <- ifelse(x>=1,1,0)
+}
+msgg.dtm<-apply(reduced_dtm,2,bernoulli_conv)
+```
+
+From the checking process, we found that there are some words with zero appearance in DTM. That is why need Laplace Smoothing to avoid zero-probability. <br />
+
+```{r}
+# Check whether need Laplace Smoothing
+num <- colSums(apply(msgg.dtm, 2, as.numeric))
+num[num < 1]
+```
+
+Set the threshold by 0.25 to optimize the model prediction performance. Less than value of 0.35 is classifiy as `ham`, otherwise set to value of `spam`. <br />
+
+```{r}
+# Predict
+submitted_prediction <- predict(spam_model, msgg.dtm, type = "raw")
+
+aaa<-as.data.frame(submitted_prediction)
+for (i in c(1:nrow(sms.s))){
+  ifelse(as.numeric(aaa[i,2]>=0.25)==1,sms.s$STATUS[i]<-"spam",
+                    sms.s$STATUS[i]<-"ham")
+}
+
+cat("\nSTATUS Proportion with Threshold 0.25 :")
+prop.table(table(sms.s$STATUS))
+```
+
+Writing submission csv submission file.
+
+```{r}
+write.csv(sms.s,"SMS_Classification.csv")
+```
